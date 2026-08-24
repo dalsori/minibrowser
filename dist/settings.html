@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title> </title>
+<style>
+  :root {
+    --bg0: #0a0a0b;
+    --text: rgba(255,255,255,0.80);
+    --dim: rgba(255,255,255,0.38);
+    --row-bg: rgba(255,255,255,0.035);
+    --row-border: rgba(255,255,255,0.08);
+    --accent: rgba(255,255,255,0.82);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 40%, #141419 0%, rgba(20,20,25,0) 55%),
+      linear-gradient(180deg, var(--bg0) 0%, #0c0c0e 100%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #panel {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    padding: 40px;
+  }
+  #title {
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 18px;
+  }
+  .row {
+    width: 420px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 15px 18px;
+    border-radius: 14px;
+    background: var(--row-bg);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--row-border);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 10px 30px rgba(0,0,0,0.4);
+  }
+  .label { font-size: 14.5px; }
+  .sub { font-size: 12px; color: var(--dim); margin-top: 2px; }
+
+  /* Toggle */
+  .switch { position: relative; width: 42px; height: 24px; flex: 0 0 auto; }
+  .switch input { opacity: 0; width: 100%; height: 100%; position: absolute; cursor: pointer; margin: 0; }
+  .track {
+    position: absolute; inset: 0;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.10);
+    transition: background .2s ease;
+  }
+  .knob {
+    position: absolute; top: 3px; left: 3px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.75);
+    transition: transform .2s ease, background .2s ease;
+  }
+  .switch input:checked ~ .track { background: rgba(255,255,255,0.85); border-color: rgba(255,255,255,0.85); }
+  .switch input:checked ~ .knob { transform: translateX(18px); background: #0a0a0b; }
+
+  /* Motor de búsqueda */
+  .seg {
+    display: flex;
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .seg button {
+    flex: 1;
+    padding: 8px 0;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--dim);
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 9px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .seg button:hover { color: var(--text); background: rgba(255,255,255,0.07); }
+  .seg button.on {
+    color: #0a0a0b;
+    background: rgba(255,255,255,0.9);
+    border-color: rgba(255,255,255,0.9);
+    font-weight: 500;
+  }
+  #hint { margin-top: 26px; font-size: 12px; color: rgba(255,255,255,0.18); }
+</style>
+</head>
+<body>
+  <div id="panel">
+    <div id="title">Ajustes</div>
+
+    <div class="row">
+      <div>
+        <div class="label">Bloqueador de anuncios</div>
+        <div class="sub">Filtra redes de anuncios y rastreadores</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="adblock">
+        <span class="track"></span>
+        <span class="knob"></span>
+      </label>
+    </div>
+
+    <div class="row">
+      <div>
+        <div class="label">Motor de búsqueda</div>
+        <div class="sub">Usado por la barra de búsqueda</div>
+        <div class="seg">
+          <button data-engine="ddg">DuckDuckGo</button>
+          <button data-engine="google">Google</button>
+          <button data-engine="bing">Bing</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="hint">Esc · volver al inicio</div>
+  </div>
+
+<script>
+  const adblockEl = document.getElementById('adblock');
+  const segEls = Array.from(document.querySelectorAll('.seg button'));
+  const go = (cmd, args) => { try { window.__TAURI__.core.invoke(cmd, args); } catch (_) {} };
+
+  adblockEl.addEventListener('change', () => go('setadblock', { enabled: adblockEl.checked }));
+  segEls.forEach(b => b.addEventListener('click', () => {
+    segEls.forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    go('setengine', { engine: b.dataset.engine });
+  }));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') go('home');
+  });
+
+  window.__TAURI__.core.invoke('getstate').then(s => {
+    adblockEl.checked = s.adblock;
+    segEls.forEach(b => b.classList.toggle('on', b.dataset.engine === s.engine));
+  }).catch(() => {});
+</script>
+</body>
+</html>
