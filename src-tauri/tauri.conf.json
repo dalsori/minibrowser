@@ -15,7 +15,7 @@
   },
   "bundle": {
     "active": true,
-    "category": "Network",
+    "category": "Utility",
     "shortDescription": "Navegador minimalista con workspaces",
     "targets": "all",
     "icon": [
