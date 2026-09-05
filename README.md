@@ -48,6 +48,16 @@ src-tauri/
   icons/                 Iconos
 ```
 
+## Instalación
+
+Descarga el paquete de tu sistema desde [Releases](https://github.com/dalsori/minibrowser/releases/latest).
+
+- **Windows (x64):** ejecuta el archivo `-setup.exe`. Instala minibrowser y lo registra en el menú Inicio y en Aplicaciones instaladas, desde donde puedes desinstalarlo.
+- **Ubuntu / Debian (x64):** descarga el `.deb` y ejecuta `sudo apt install ./minibrowser_*.deb` desde la carpeta de descargas.
+- **Fedora (x64):** descarga el `.rpm` y ejecuta `sudo dnf install ./minibrowser-*.rpm` desde la carpeta de descargas.
+
+Los paquetes Linux instalan el icono y el acceso en el menú de aplicaciones. El ZIP de Windows es una alternativa portable, no un instalador.
+
 ## Desarrollo
 
 Requisitos: [Rust](https://www.rust-lang.org/) y las dependencias de [Tauri](https://tauri.app/start/prerequisites/).
