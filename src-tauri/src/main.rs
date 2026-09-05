@@ -5,22 +5,27 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::http::{Request, Response};
-use tauri::{
-    Manager, Position, Size, State, Webview, WebviewBuilder, WebviewUrl, WindowBuilder,
-};
+use tauri::webview::PageLoadEvent;
 use tauri::WindowEvent;
+use tauri::{Manager, Position, Size, State, Webview, WebviewBuilder, WebviewUrl, WindowBuilder};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 struct AppState {
     home_url: Mutex<url::Url>,
     adblock: Arc<AtomicBool>,
     engine: Mutex<String>,
-    blocked: Arc<HashSet<String>>,
 }
 
 struct Workspaces {
     labels: Mutex<Vec<String>>,
     active: Mutex<usize>,
+    creating: AtomicBool,
 }
+
+// Mantiene audio/vídeo en segundo plano sin desactivar el throttling general de pestañas.
+const BROWSER_ARGS: &str = "--disable-background-media-suspend";
+const PARKED_X: i32 = 100_000;
+const MAX_WORKSPACES: usize = 4;
 
 #[derive(serde::Serialize)]
 struct StatePayload {
@@ -28,14 +33,17 @@ struct StatePayload {
     engine: String,
 }
 
+#[derive(serde::Serialize)]
+struct WorkspacePayload {
+    active: usize,
+    total: usize,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DiskSettings {
     adblock: bool,
     engine: String,
 }
-
-// Flags de Chromium: desactiva GPU (menos RAM) y fuerza DNS-over-HTTPS a Cloudflare.
-const ARGS: &str = "--disable-gpu --enable-features=dns-over-https";
 
 const ADBLOCK: &[&str] = &[
     "2mdn.net",
@@ -154,7 +162,9 @@ const ADBLOCK: &[&str] = &[
 // Patrones de URL de anuncios (sobre todo YouTube, no cubiertos por dominio).
 const ADBLOCK_URL: &[&str] = &[
     "youtube.com/api/stats/ads",
+    "youtube.com/pagead/",
     "/youtubei/v1/player/get_ad_break",
+    "/get_midroll_info",
     "youtube.com/api/timedtext?type=track",
     "adservice.google.com",
     "googleads.g.doubleclick.net",
@@ -163,6 +173,9 @@ const ADBLOCK_URL: &[&str] = &[
     "static.doubleclick.net",
     "ad.doubleclick.net",
     "g.doubleclick.net",
+    "google.com/aclk",
+    "google.com/pagead/",
+    "/pagead/",
 ];
 
 fn blocked_hosts() -> HashSet<String> {
@@ -199,13 +212,75 @@ fn url_blocked(uri: &str) -> bool {
 
 // Atajos globales inyectados en TODA página (remota incluida).
 const INIT_JS: &str = r#"
+(() => {
+  const selectors = [
+    '[data-text-ad]', '.uEierd',
+    '.video-ads', '.ytp-ad-module', 'ytd-ad-slot-renderer',
+    'ytd-promoted-sparkles-web-renderer', 'ytd-display-ad-renderer',
+    'ytd-in-feed-ad-layout-renderer', 'ytd-banner-promo-renderer',
+    'ytd-action-companion-ad-renderer', 'ytd-promoted-video-renderer'
+  ];
+  let scheduled = false;
+  const clean = () => {
+    scheduled = false;
+    document.querySelectorAll(selectors.join(',')).forEach((node) => node.remove());
+    document.querySelectorAll('.ytp-ad-skip-button, .ytp-skip-ad-button, .ytp-ad-skip-button-modern').forEach((button) => button.click());
+    const player = document.querySelector('.html5-video-player.ad-showing');
+    const video = player?.querySelector('video');
+    if (video && Number.isFinite(video.duration)) video.currentTime = Math.max(0, video.duration - 0.1);
+  };
+  const scheduleClean = () => {
+    if (!scheduled) { scheduled = true; requestAnimationFrame(clean); }
+  };
+  const start = () => {
+    clean();
+    new MutationObserver(scheduleClean).observe(document.documentElement, { childList: true, subtree: true });
+  };
+  window.__TAURI__?.core.invoke('getstate').then((state) => { if (state.adblock) start(); }).catch(() => {});
+})();
+
+setTimeout(() => {
+  window.__TAURI__?.core.invoke('getworkspaces').then(({ active, total }) => {
+    let badge = document.querySelector('#minibrowser-workspace-badge');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = 'minibrowser-workspace-badge';
+      Object.assign(badge.style, {
+        position: 'fixed', left: '14px', bottom: '14px', zIndex: '2147483647',
+        padding: '6px 9px', borderRadius: '8px', pointerEvents: 'none',
+        background: '#15171dee', color: '#c8ced8', border: '1px solid #3d4552',
+        font: '11px/1.2 system-ui, sans-serif', boxShadow: '0 8px 24px #0008'
+      });
+      document.documentElement.appendChild(badge);
+    }
+    badge.textContent = `Espacio ${active} / ${total}`;
+  }).catch(() => {});
+}, 250);
+
 document.addEventListener('keydown', (e) => {
   const mod = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
   const isLocal = location.hostname === 'tauri.localhost';
+  const showError = (error) => {
+    let notice = document.querySelector('#minibrowser-error');
+    if (!notice) {
+      notice = document.createElement('div');
+      notice.id = 'minibrowser-error';
+      Object.assign(notice.style, {
+        position: 'fixed', right: '16px', bottom: '16px', zIndex: '2147483647',
+        maxWidth: '360px', padding: '12px 14px', borderRadius: '10px',
+        background: '#2b171a', color: '#ffb4b4', border: '1px solid #71343b',
+        font: '13px/1.4 system-ui, sans-serif', boxShadow: '0 12px 32px #0008'
+      });
+      document.documentElement.appendChild(notice);
+    }
+    notice.textContent = `Minibrowser: ${String(error)}`;
+    clearTimeout(window.__minibrowserErrorTimer);
+    window.__minibrowserErrorTimer = setTimeout(() => notice.remove(), 5000);
+  };
   const go = (cmd, args) => {
     e.preventDefault();
-    try { window.__TAURI__.core.invoke(cmd, args); } catch (_) {}
+    try { window.__TAURI__.core.invoke(cmd, args).catch(showError); } catch (error) { showError(error); }
   };
 
   // workspaces (tmux-like)
@@ -249,10 +324,21 @@ fn resolve_query(q: &str, engine: &str) -> String {
         return q.to_string();
     }
     let looks_like_url = !q.contains(' ')
-        && (q.contains('.') || q.contains(':') || q.contains('/')
+        && (q.contains('.')
+            || q.contains(':')
+            || q.contains('/')
             || q.eq_ignore_ascii_case("localhost"));
     if looks_like_url {
-        return format!("https://{}", q);
+        let scheme = if q.eq_ignore_ascii_case("localhost")
+            || lower.starts_with("localhost:")
+            || lower.starts_with("127.0.0.1")
+            || lower.starts_with("[::1]")
+        {
+            "http"
+        } else {
+            "https"
+        };
+        return format!("{}://{}", scheme, q);
     }
     let enc: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
     match engine {
@@ -260,11 +346,6 @@ fn resolve_query(q: &str, engine: &str) -> String {
         "bing" => format!("https://www.bing.com/search?q={}", enc),
         _ => format!("https://html.duckduckgo.com/html/?q={}", enc),
     }
-}
-
-fn parse_url(s: &str) -> url::Url {
-    url::Url::parse(s)
-        .unwrap_or_else(|_| url::Url::parse("https://www.google.com/").unwrap())
 }
 
 fn build_home_url() -> url::Url {
@@ -282,7 +363,8 @@ fn make_webview(
 ) -> WebviewBuilder<tauri::Wry> {
     WebviewBuilder::new(label.to_string(), WebviewUrl::App("index.html".into()))
         .initialization_script(INIT_JS)
-        .additional_browser_args(ARGS)
+        .additional_browser_args(BROWSER_ARGS)
+        .auto_resize()
         .on_web_resource_request(
             move |request: Request<Vec<u8>>, response: &mut Response<Cow<'static, [u8]>>| {
                 if adblock.load(Ordering::Relaxed) {
@@ -304,24 +386,46 @@ fn make_webview(
         )
 }
 
+fn show_workspace_badge(webview: &Webview, index: usize, total: usize) {
+    let script = format!(
+        r#"(() => {{
+          let badge = document.querySelector('#minibrowser-workspace-badge');
+          if (!badge) {{
+            badge = document.createElement('div');
+            badge.id = 'minibrowser-workspace-badge';
+            Object.assign(badge.style, {{
+              position: 'fixed', left: '14px', bottom: '14px', zIndex: '2147483647',
+              padding: '6px 9px', borderRadius: '8px', pointerEvents: 'none',
+              background: '#15171dee', color: '#c8ced8', border: '1px solid #3d4552',
+              font: '11px/1.2 system-ui, sans-serif', boxShadow: '0 8px 24px #0008'
+            }});
+            document.documentElement.appendChild(badge);
+          }}
+          badge.textContent = 'Espacio {} / {}';
+        }})()"#,
+        index + 1,
+        total
+    );
+    let _ = webview.eval(&script);
+}
+
 #[tauri::command]
-fn open(webview: Webview, state: State<AppState>, query: String) {
+fn open(state: State<AppState>, query: String) -> String {
     let engine = state.engine.lock().unwrap().clone();
-    let url = parse_url(&resolve_query(&query, &engine));
-    let _ = webview.navigate(url);
+    resolve_query(&query, &engine)
 }
 
 #[tauri::command]
-fn home(webview: Webview, state: State<AppState>) {
+fn home(webview: Webview, state: State<AppState>) -> Result<(), String> {
     let url = state.home_url.lock().unwrap().clone();
-    let _ = webview.navigate(url);
+    webview.navigate(url).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn settings(webview: Webview, state: State<AppState>) {
+fn settings(webview: Webview, state: State<AppState>) -> Result<(), String> {
     let mut url = state.home_url.lock().unwrap().clone();
-    let _ = url.set_path("settings.html");
-    let _ = webview.navigate(url);
+    url.set_path("settings.html");
+    webview.navigate(url).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -340,72 +444,144 @@ fn forward(webview: Webview) {
 }
 
 #[tauri::command]
-fn ws(app: tauri::AppHandle, webview: Webview, dir: i32) {
-    let st = app.state::<Workspaces>();
-    let labels = st.labels.lock().unwrap();
+fn ws(app: tauri::AppHandle, webview: Webview, state: State<Workspaces>, dir: i32) {
+    let labels = state.labels.lock().unwrap();
     let n = labels.len();
     if n == 0 {
         return;
     }
     let cur = labels
         .iter()
-        .position(|l| l == webview.label())
-        .unwrap_or_else(|| *st.active.lock().unwrap());
+        .position(|label| label == webview.label())
+        .unwrap_or_else(|| *state.active.lock().unwrap());
     let target = (cur as i32 + dir).rem_euclid(n as i32) as usize;
     if target == cur {
         return;
     }
-    let (cur_label, target_label) = (labels[cur].clone(), labels[target].clone());
+    let (current_label, target_label) = (labels[cur].clone(), labels[target].clone());
     drop(labels);
-    if let Some(w) = app.get_webview(&cur_label) {
-        let _ = w.hide();
+    if let Some(current) = app.get_webview(&current_label) {
+        let _ = current.set_position(Position::Physical(tauri::PhysicalPosition::new(
+            PARKED_X, 0,
+        )));
     }
-    if let Some(w) = app.get_webview(&target_label) {
-        let _ = w.show();
-        let _ = w.set_focus();
+    if let Some(next) = app.get_webview(&target_label) {
+        let _ = next.set_position(Position::Physical(tauri::PhysicalPosition::new(0, 0)));
+        let _ = next.set_focus();
+        show_workspace_badge(&next, target, n);
     }
-    *st.active.lock().unwrap() = target;
+    *state.active.lock().unwrap() = target;
 }
 
-#[tauri::command]
-fn wsnew(app: tauri::AppHandle, webview: Webview, state: State<AppState>) {
-    let st = app.state::<Workspaces>();
-    let n = st.labels.lock().unwrap().len();
-    let label = format!("ws{}", n);
+fn create_workspace(app: &tauri::AppHandle, webview: Webview) -> Result<(), String> {
+    let app_state = app.state::<AppState>();
+    let workspaces = app.state::<Workspaces>();
+    if workspaces
+        .creating
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return Err("Ya se está creando un workspace".into());
+    }
+    let mut labels = workspaces.labels.lock().unwrap();
+    if labels.len() >= MAX_WORKSPACES {
+        workspaces.creating.store(false, Ordering::Release);
+        return Err(format!("Límite de {MAX_WORKSPACES} workspaces alcanzado"));
+    }
+    let cur = *workspaces.active.lock().unwrap();
+    let label = format!("ws{}", labels.len());
+    let current_label = labels[cur].clone();
     let window = webview.window();
     let Ok(size) = window.inner_size() else {
-        return;
+        workspaces.creating.store(false, Ordering::Release);
+        return Err("No se pudo obtener el tamaño de la ventana".into());
     };
-    let builder = make_webview(&label, state.blocked.clone(), state.adblock.clone());
-    let Ok(wv) = window.add_child(
+    labels.push(label.clone());
+    drop(labels);
+
+    let app_on_load = app.clone();
+    let current_on_load = current_label.clone();
+    let label_on_load = label.clone();
+    let activated = Arc::new(AtomicBool::new(false));
+    let activated_on_load = activated.clone();
+    let builder = make_webview(&label, Arc::new(blocked_hosts()), app_state.adblock.clone())
+        .on_page_load(move |new_webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished)
+                && !activated_on_load.swap(true, Ordering::AcqRel)
+            {
+                if let Some(current) = app_on_load.get_webview(&current_on_load) {
+                    let _ = current.set_position(Position::Physical(tauri::PhysicalPosition::new(
+                        PARKED_X, 0,
+                    )));
+                }
+                let _ = new_webview
+                    .set_position(Position::Physical(tauri::PhysicalPosition::new(0, 0)));
+                let _ = new_webview.set_focus();
+                let state = app_on_load.state::<Workspaces>();
+                let (index, total) = {
+                    let labels = state.labels.lock().unwrap();
+                    (
+                        labels.iter().position(|item| item == &label_on_load),
+                        labels.len(),
+                    )
+                };
+                if let Some(index) = index {
+                    *state.active.lock().unwrap() = index;
+                    show_workspace_badge(&new_webview, index, total);
+                }
+                let _ = new_webview.eval(
+                    "document.querySelector('#search-input')?.focus(); document.querySelector('#search-input')?.select()",
+                );
+                state.creating.store(false, Ordering::Release);
+            }
+        });
+    let Ok(next) = window.add_child(
         builder,
         Position::Physical(tauri::PhysicalPosition::new(0, 0)),
         Size::Physical(size),
     ) else {
-        return;
+        workspaces
+            .labels
+            .lock()
+            .unwrap()
+            .retain(|item| item != &label);
+        workspaces.creating.store(false, Ordering::Release);
+        return Err("No se pudo crear el workspace".into());
     };
-    let cur = *st.active.lock().unwrap();
-    let cur_label = st.labels.lock().unwrap()[cur].clone();
-    st.labels.lock().unwrap().push(label.clone());
-    if let Some(w) = app.get_webview(&cur_label) {
-        let _ = w.hide();
-    }
-    let _ = wv.show();
-    let _ = wv.set_focus();
-    *st.active.lock().unwrap() = n;
-    let _ = wv.navigate(state.home_url.lock().unwrap().clone());
+    drop(next);
+    Ok(())
 }
 
 #[tauri::command]
-fn setadblock(app: tauri::AppHandle, state: State<AppState>, enabled: bool) {
+fn wsnew(app: tauri::AppHandle, webview: Webview) -> Result<(), String> {
+    create_workspace(&app, webview)
+}
+
+#[tauri::command]
+fn setadblock(app: tauri::AppHandle, state: State<AppState>, enabled: bool) -> Result<(), String> {
+    let previous = state.adblock.load(Ordering::Relaxed);
     state.adblock.store(enabled, Ordering::Relaxed);
-    save_settings(&app, &state);
+    if let Err(error) = save_settings(&app, &state) {
+        state.adblock.store(previous, Ordering::Relaxed);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn setengine(app: tauri::AppHandle, state: State<AppState>, engine: String) {
-    *state.engine.lock().unwrap() = engine;
-    save_settings(&app, &state);
+fn setengine(app: tauri::AppHandle, state: State<AppState>, engine: String) -> Result<(), String> {
+    if !matches!(engine.as_str(), "ddg" | "google" | "bing") {
+        return Err("Motor de búsqueda no válido".into());
+    }
+    let previous = {
+        let mut current = state.engine.lock().unwrap();
+        std::mem::replace(&mut *current, engine)
+    };
+    if let Err(error) = save_settings(&app, &state) {
+        *state.engine.lock().unwrap() = previous;
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -416,6 +592,14 @@ fn getstate(state: State<AppState>) -> StatePayload {
     }
 }
 
+#[tauri::command]
+fn getworkspaces(state: State<Workspaces>) -> WorkspacePayload {
+    WorkspacePayload {
+        active: *state.active.lock().unwrap() + 1,
+        total: state.labels.lock().unwrap().len(),
+    }
+}
+
 fn settings_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     app.path()
         .app_config_dir()
@@ -423,16 +607,18 @@ fn settings_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
         .map(|d| d.join("settings.json"))
 }
 
-fn save_settings(app: &tauri::AppHandle, state: &AppState) {
-    let Some(path) = settings_path(app) else { return };
+fn save_settings(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    let path = settings_path(app)
+        .ok_or_else(|| "No se pudo encontrar la carpeta de configuración".to_string())?;
     let data = DiskSettings {
         adblock: state.adblock.load(Ordering::Relaxed),
         engine: state.engine.lock().unwrap().clone(),
     };
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     }
-    let _ = std::fs::write(path, serde_json::to_string(&data).unwrap());
+    let json = serde_json::to_string(&data).map_err(|error| error.to_string())?;
+    std::fs::write(path, json).map_err(|error| error.to_string())
 }
 
 fn load_settings(app: &tauri::AppHandle) -> DiskSettings {
@@ -454,17 +640,33 @@ fn load_settings(app: &tauri::AppHandle) -> DiskSettings {
 fn main() {
     let blocked = Arc::new(blocked_hosts());
     let adblock = Arc::new(AtomicBool::new(true));
+    let workspace_shortcut = Shortcut::new(Some(Modifiers::CONTROL), Code::KeyT);
+    let handler_shortcut = workspace_shortcut;
 
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, shortcut, event| {
+                    if shortcut == &handler_shortcut && event.state() == ShortcutState::Pressed {
+                        let state = app.state::<Workspaces>();
+                        let active = *state.active.lock().unwrap();
+                        let label = state.labels.lock().unwrap().get(active).cloned();
+                        if let Some(webview) = label.and_then(|label| app.get_webview(&label)) {
+                            let _ = create_workspace(app, webview);
+                        }
+                    }
+                })
+                .build(),
+        )
         .manage(AppState {
             home_url: Mutex::new(build_home_url()),
             adblock: adblock.clone(),
             engine: Mutex::new("google".into()),
-            blocked: blocked.clone(),
         })
         .manage(Workspaces {
             labels: Mutex::new(vec!["ws0".to_string()]),
             active: Mutex::new(0),
+            creating: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             open,
@@ -477,9 +679,11 @@ fn main() {
             wsnew,
             setadblock,
             setengine,
-            getstate
+            getstate,
+            getworkspaces
         ])
         .setup(move |app| {
+            app.global_shortcut().register(workspace_shortcut)?;
             let disk = load_settings(app.handle());
             adblock.store(disk.adblock, Ordering::Relaxed);
             *app.state::<AppState>().engine.lock().unwrap() = disk.engine;
@@ -491,21 +695,16 @@ fn main() {
                 .min_inner_size(480.0, 320.0)
                 .center()
                 .build()?;
-
-            let app2 = app.handle().clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::Resized(size) = event {
-                    let ws = app2.state::<Workspaces>();
-                    let labels = ws.labels.lock().unwrap();
-                    for l in labels.iter() {
-                        if let Some(w) = app2.get_webview(l) {
-                            let _ = w.set_size(Size::Physical(*size));
-                            let _ = w.set_position(Position::Physical(
-                                tauri::PhysicalPosition::new(0, 0),
-                            ));
-                        }
-                    }
+            let focus_app = app.handle().clone();
+            let focus_shortcut = workspace_shortcut;
+            window.on_window_event(move |event| match event {
+                WindowEvent::Focused(true) => {
+                    let _ = focus_app.global_shortcut().register(focus_shortcut);
                 }
+                WindowEvent::Focused(false) => {
+                    let _ = focus_app.global_shortcut().unregister(focus_shortcut);
+                }
+                _ => {}
             });
 
             let size = window.inner_size()?;
@@ -515,6 +714,7 @@ fn main() {
                 Size::Physical(size),
             )?;
             let _ = wv.set_focus();
+            show_workspace_badge(&wv, 0, 1);
 
             Ok(())
         })
@@ -565,18 +765,29 @@ mod tests {
         assert!(url_blocked(u));
         let u = "https://rr1.googlevideo.com/videoplayback?id=abc&x=2";
         assert!(!url_blocked(u));
+        assert!(url_blocked("https://www.google.com/aclk?sa=L&ai=test"));
+        assert!(url_blocked(
+            "https://www.youtube.com/pagead/interaction/?ai=test"
+        ));
     }
 
     #[test]
     fn resolve_url_direct() {
-        assert_eq!(resolve_query("example.com", "google"), "https://example.com");
+        assert_eq!(
+            resolve_query("example.com", "google"),
+            "https://example.com"
+        );
         assert_eq!(
             resolve_query("https://x.org/a", "google"),
             "https://x.org/a"
         );
         assert_eq!(
             resolve_query("localhost:8080", "google"),
-            "https://localhost:8080"
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            resolve_query("127.0.0.1:3000", "google"),
+            "http://127.0.0.1:3000"
         );
     }
 
@@ -585,5 +796,14 @@ mod tests {
         let g = resolve_query("gatos bonitos", "google");
         assert!(g.starts_with("https://www.google.com/search?q="));
         assert!(g.contains("gatos"));
+    }
+
+    #[test]
+    fn resolve_empty_query_uses_selected_engine() {
+        assert_eq!(
+            resolve_query("  ", "ddg"),
+            "https://html.duckduckgo.com/html/"
+        );
+        assert_eq!(resolve_query("", "bing"), "https://www.bing.com/");
     }
 }

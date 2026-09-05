@@ -1,6 +1,6 @@
 fn main() {
-    tauri_build::try_build(
-        tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
             "open",
             "home",
             "settings",
@@ -12,7 +12,8 @@ fn main() {
             "setadblock",
             "setengine",
             "getstate",
-        ])),
-    )
+            "getworkspaces",
+        ]),
+    ))
     .unwrap();
 }

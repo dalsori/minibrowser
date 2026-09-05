@@ -15,6 +15,7 @@
     "allow-wsnew",
     "allow-setadblock",
     "allow-setengine",
-    "allow-getstate"
+    "allow-getstate",
+    "allow-getworkspaces"
   ]
 }
