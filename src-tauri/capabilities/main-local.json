@@ -16,6 +16,10 @@
     "allow-setadblock",
     "allow-setengine",
     "allow-getstate",
-    "allow-getworkspaces"
+    "allow-getworkspaces",
+    "allow-setmemorybudget",
+    "allow-memory-status",
+    "allow-memory-report",
+    "allow-memory-restore"
   ]
 }

@@ -1,4 +1,4 @@
-﻿<p align="center">
+<p align="center">
   <img src="dist/logo.png" alt="El planeta sonriente de minibrowser" width="140">
 </p>
 
@@ -32,17 +32,20 @@
 
 ## Un espacio para cada cosa
 
-Abre un workspace para buscar, otro para leer y otro para tu música. Cambia entre ellos con el teclado mientras tus páginas conservan su estado y la reproducción multimedia continúa.
+Abre un workspace para buscar, otro para leer y otro para tu música. Cambia entre ellos con el teclado mientras la reproducción multimedia continúa. En Windows, los espacios inactivos pueden entrar en reposo o recargarse al volver para ahorrar memoria.
 
 | | Qué puedes hacer |
 | --- | --- |
-| **Workspaces** | Organiza hasta cuatro espacios dentro de una misma ventana, con controles inspirados en tmux. |
+| **Workspaces** | Organiza hasta doce espacios dentro de una misma ventana, con controles inspirados en tmux. |
 | **El teclado primero** | Busca, abre espacios y cambia de página sin depender del ratón. |
 | **Tu buscador favorito** | Elige entre DuckDuckGo, Google y Bing. |
 | **Menos anuncios** | Activa el filtro integrado de redes publicitarias y elementos promocionados. |
+| **Presupuesto de RAM (Windows)** | Objetivo configurable de 1 GB por defecto. Suspende espacios inactivos y descarga los menos recientes bajo presión, protegiendo reproducción y formularios editados. |
 | **Ajustes que se quedan** | Conserva tus preferencias entre sesiones. |
 
 Construido con **Rust + Tauri 2**, con una interfaz en HTML, CSS y JavaScript y renderizado acelerado por hardware. El bloqueador es un filtro ligero; no sustituye todas las funciones de uBlock Origin.
+
+El presupuesto de RAM es un objetivo, no un límite estricto. En Windows se estima la memoria residente del proceso principal y sus descendientes cada 5 segundos; las páginas compartidas pueden contarse más de una vez. Tras 30 segundos de inactividad se intenta suspender un espacio. Si el uso supera el 90 % del presupuesto, se descargan progresivamente los espacios suspendidos menos recientes, dejando 15 segundos entre descargas para volver a medir. Al regresar se recarga la URL y se intenta recuperar el desplazamiento y la posición del video pausado. Las páginas con reproducción, formularios editados o contenido incrustado cuyo estado no se puede comprobar se conservan. Por eso varios videos reproduciéndose a la vez pueden superar el objetivo. La gestión automática está disponible en Windows; Linux conserva el comportamiento anterior.
 
 ## Instalación
 
@@ -50,9 +53,9 @@ Elige el paquete para tu sistema. Todos los instaladores son para **x64**.
 
 | Sistema | Descarga | Cómo instalar |
 | --- | --- | --- |
-| **Windows** | [Instalador .exe](https://github.com/dalsori/minibrowser/releases/download/v0.1.0/minibrowser_0.1.0_x64-setup.exe) | Abre el archivo y sigue el asistente. |
-| **Ubuntu / Debian** | [Paquete .deb](https://github.com/dalsori/minibrowser/releases/download/v0.1.0/minibrowser_0.1.0_amd64.deb) | Instálalo con `apt`, como se indica abajo. |
-| **Fedora** | [Paquete .rpm](https://github.com/dalsori/minibrowser/releases/download/v0.1.0/minibrowser-0.1.0-1.x86_64.rpm) | Instálalo con `dnf`, como se indica abajo. |
+| **Windows** | [Instalador .exe](https://github.com/dalsori/minibrowser/releases/download/v0.2.0/minibrowser_0.2.0_x64-setup.exe) | Abre el archivo y sigue el asistente. |
+| **Ubuntu / Debian** | [Paquete .deb](https://github.com/dalsori/minibrowser/releases/download/v0.2.0/minibrowser_0.2.0_amd64.deb) | Instálalo con `apt`, como se indica abajo. |
+| **Fedora** | [Paquete .rpm](https://github.com/dalsori/minibrowser/releases/download/v0.2.0/minibrowser-0.2.0-1.x86_64.rpm) | Instálalo con `dnf`, como se indica abajo. |
 
 **Windows:** minibrowser aparece en el menú Inicio y en **Aplicaciones instaladas**, desde donde puedes desinstalarlo.
 

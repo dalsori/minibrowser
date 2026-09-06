@@ -4,7 +4,7 @@
   "description": "Permite atajos de teclado (volver al inicio, ajustes, recargar, atras/adelante) desde paginas web navegadas",
   "windows": ["main"],
   "remote": {
-    "urls": ["https://*", "http://*"]
+    "urls": ["https://*:*", "http://*:*"]
   },
   "permissions": [
     "core:default",
@@ -16,6 +16,8 @@
     "allow-ws",
     "allow-wsnew",
     "allow-getstate",
-    "allow-getworkspaces"
+    "allow-getworkspaces",
+    "allow-memory-report",
+    "allow-memory-restore"
   ]
 }

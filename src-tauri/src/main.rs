@@ -10,6 +10,8 @@ use tauri::WindowEvent;
 use tauri::{Manager, Position, Size, State, Webview, WebviewBuilder, WebviewUrl, WindowBuilder};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod memory;
+
 struct AppState {
     home_url: Mutex<url::Url>,
     adblock: Arc<AtomicBool>,
@@ -25,7 +27,7 @@ struct Workspaces {
 // Mantiene audio/vídeo en segundo plano sin desactivar el throttling general de pestañas.
 const BROWSER_ARGS: &str = "--disable-background-media-suspend";
 const PARKED_X: i32 = 100_000;
-const MAX_WORKSPACES: usize = 4;
+const MAX_WORKSPACES: usize = 12;
 
 #[derive(serde::Serialize)]
 struct StatePayload {
@@ -43,6 +45,12 @@ struct WorkspacePayload {
 struct DiskSettings {
     adblock: bool,
     engine: String,
+    #[serde(default = "default_memory_budget")]
+    memory_budget_mb: u64,
+}
+
+fn default_memory_budget() -> u64 {
+    memory::DEFAULT_BUDGET_MB
 }
 
 const ADBLOCK: &[&str] = &[
@@ -363,6 +371,10 @@ fn make_webview(
 ) -> WebviewBuilder<tauri::Wry> {
     WebviewBuilder::new(label.to_string(), WebviewUrl::App("index.html".into()))
         .initialization_script(INIT_JS)
+        .initialization_script(memory::SCRIPT)
+        .on_page_load(|webview, payload| {
+            memory::page_load(&webview, payload.event(), payload.url())
+        })
         .additional_browser_args(BROWSER_ARGS)
         .auto_resize()
         .on_web_resource_request(
@@ -444,11 +456,19 @@ fn forward(webview: Webview) {
 }
 
 #[tauri::command]
-fn ws(app: tauri::AppHandle, webview: Webview, state: State<Workspaces>, dir: i32) {
+fn ws(
+    app: tauri::AppHandle,
+    webview: Webview,
+    state: State<Workspaces>,
+    dir: i32,
+) -> Result<(), String> {
+    if state.creating.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let labels = state.labels.lock().unwrap();
     let n = labels.len();
     if n == 0 {
-        return;
+        return Ok(());
     }
     let cur = labels
         .iter()
@@ -456,10 +476,14 @@ fn ws(app: tauri::AppHandle, webview: Webview, state: State<Workspaces>, dir: i3
         .unwrap_or_else(|| *state.active.lock().unwrap());
     let target = (cur as i32 + dir).rem_euclid(n as i32) as usize;
     if target == cur {
-        return;
+        return Ok(());
     }
     let (current_label, target_label) = (labels[cur].clone(), labels[target].clone());
     drop(labels);
+    let next = app
+        .get_webview(&target_label)
+        .ok_or("No se pudo recuperar el espacio")?;
+    memory::activate(&next)?;
     if let Some(current) = app.get_webview(&current_label) {
         let _ = current.set_position(Position::Physical(tauri::PhysicalPosition::new(
             PARKED_X, 0,
@@ -471,6 +495,7 @@ fn ws(app: tauri::AppHandle, webview: Webview, state: State<Workspaces>, dir: i3
         show_workspace_badge(&next, target, n);
     }
     *state.active.lock().unwrap() = target;
+    Ok(())
 }
 
 fn create_workspace(app: &tauri::AppHandle, webview: Webview) -> Result<(), String> {
@@ -506,9 +531,11 @@ fn create_workspace(app: &tauri::AppHandle, webview: Webview) -> Result<(), Stri
     let activated_on_load = activated.clone();
     let builder = make_webview(&label, Arc::new(blocked_hosts()), app_state.adblock.clone())
         .on_page_load(move |new_webview, payload| {
+            memory::page_load(&new_webview, payload.event(), payload.url());
             if matches!(payload.event(), PageLoadEvent::Finished)
                 && !activated_on_load.swap(true, Ordering::AcqRel)
             {
+                let _ = memory::activate(&new_webview);
                 if let Some(current) = app_on_load.get_webview(&current_on_load) {
                     let _ = current.set_position(Position::Physical(tauri::PhysicalPosition::new(
                         PARKED_X, 0,
@@ -553,7 +580,7 @@ fn create_workspace(app: &tauri::AppHandle, webview: Webview) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn wsnew(app: tauri::AppHandle, webview: Webview) -> Result<(), String> {
+async fn wsnew(app: tauri::AppHandle, webview: Webview) -> Result<(), String> {
     create_workspace(&app, webview)
 }
 
@@ -585,6 +612,24 @@ fn setengine(app: tauri::AppHandle, state: State<AppState>, engine: String) -> R
 }
 
 #[tauri::command]
+fn setmemorybudget(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    budget_mb: u64,
+) -> Result<(), String> {
+    if !(512..=8192).contains(&budget_mb) {
+        return Err("El presupuesto debe estar entre 512 y 8192 MB".into());
+    }
+    let memory = app.state::<memory::MemoryManager>();
+    let previous = memory.budget_mb.swap(budget_mb, Ordering::Relaxed);
+    if let Err(error) = save_settings(&app, &state) {
+        memory.budget_mb.store(previous, Ordering::Relaxed);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn getstate(state: State<AppState>) -> StatePayload {
     StatePayload {
         adblock: state.adblock.load(Ordering::Relaxed),
@@ -594,9 +639,10 @@ fn getstate(state: State<AppState>) -> StatePayload {
 
 #[tauri::command]
 fn getworkspaces(state: State<Workspaces>) -> WorkspacePayload {
+    let total = state.labels.lock().unwrap().len();
     WorkspacePayload {
         active: *state.active.lock().unwrap() + 1,
-        total: state.labels.lock().unwrap().len(),
+        total,
     }
 }
 
@@ -613,6 +659,10 @@ fn save_settings(app: &tauri::AppHandle, state: &AppState) -> Result<(), String>
     let data = DiskSettings {
         adblock: state.adblock.load(Ordering::Relaxed),
         engine: state.engine.lock().unwrap().clone(),
+        memory_budget_mb: app
+            .state::<memory::MemoryManager>()
+            .budget_mb
+            .load(Ordering::Relaxed),
     };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
@@ -626,6 +676,7 @@ fn load_settings(app: &tauri::AppHandle) -> DiskSettings {
         return DiskSettings {
             adblock: true,
             engine: "google".into(),
+            memory_budget_mb: default_memory_budget(),
         };
     };
     std::fs::read_to_string(&path)
@@ -634,6 +685,7 @@ fn load_settings(app: &tauri::AppHandle) -> DiskSettings {
         .unwrap_or(DiskSettings {
             adblock: true,
             engine: "google".into(),
+            memory_budget_mb: default_memory_budget(),
         })
 }
 
@@ -668,6 +720,7 @@ fn main() {
             active: Mutex::new(0),
             creating: AtomicBool::new(false),
         })
+        .manage(memory::MemoryManager::default())
         .invoke_handler(tauri::generate_handler![
             open,
             home,
@@ -680,11 +733,18 @@ fn main() {
             setadblock,
             setengine,
             getstate,
-            getworkspaces
+            getworkspaces,
+            setmemorybudget,
+            memory::memory_status,
+            memory::memory_report,
+            memory::memory_restore
         ])
         .setup(move |app| {
             app.global_shortcut().register(workspace_shortcut)?;
             let disk = load_settings(app.handle());
+            app.state::<memory::MemoryManager>()
+                .budget_mb
+                .store(disk.memory_budget_mb.clamp(512, 8192), Ordering::Relaxed);
             adblock.store(disk.adblock, Ordering::Relaxed);
             *app.state::<AppState>().engine.lock().unwrap() = disk.engine;
             *app.state::<AppState>().home_url.lock().unwrap() = build_home_url();
@@ -714,7 +774,9 @@ fn main() {
                 Size::Physical(size),
             )?;
             let _ = wv.set_focus();
+            let _ = memory::activate(&wv);
             show_workspace_badge(&wv, 0, 1);
+            memory::start(app.handle());
 
             Ok(())
         })

@@ -13,6 +13,10 @@ fn main() {
             "setengine",
             "getstate",
             "getworkspaces",
+            "setmemorybudget",
+            "memory_status",
+            "memory_report",
+            "memory_restore",
         ]),
     ))
     .unwrap();
